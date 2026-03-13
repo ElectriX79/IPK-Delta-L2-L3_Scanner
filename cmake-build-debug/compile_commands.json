@@ -1,8 +1,0 @@
-[
-{
-  "directory": "/home/electrix/School/IPK/cmake-build-debug",
-  "command": "/usr/bin/cc -g -std=gnu11 -fdiagnostics-color=always -o CMakeFiles/IPK.dir/main.c.o -c /home/electrix/School/IPK/main.c",
-  "file": "/home/electrix/School/IPK/main.c",
-  "output": "/home/electrix/School/IPK/cmake-build-debug/CMakeFiles/IPK.dir/main.c.o"
-}
-]

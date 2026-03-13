@@ -1,3 +1,0 @@
-/home/electrix/School/IPK/cmake-build-debug/CMakeFiles/IPK.dir
-/home/electrix/School/IPK/cmake-build-debug/CMakeFiles/edit_cache.dir
-/home/electrix/School/IPK/cmake-build-debug/CMakeFiles/rebuild_cache.dir
