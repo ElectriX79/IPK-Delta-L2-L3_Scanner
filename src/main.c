@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 
+
 void print_usage() {
     printf("-h/--help writes usage instructions to stdout and terminates with 0 exit code.\n");
     printf("-i eth0 (just one interface to scan through)\n");
@@ -55,16 +56,32 @@ void subnet_address(char *ip_address, struct program_interface *config) {
 
         int prefix = atoi((slash+1));
 
+        if(prefix > 32 || prefix <0) {
+            printf("Invalid prefix\n");
+            exit(1);
+        }
 
         struct in_addr ipv4_binary;
         if(inet_pton(AF_INET,ip_address,&ipv4_binary) != 1) {
-            perror("Invalid format of IPv4 address, Template: xxx.xxx.xxx.xxx/zz, where zz is prefix");
+            printf("Invalid format of IPv4 address, Template: xxx.xxx.xxx.xxx/zz, where zz is prefix\n");
         }
+        const uint32_t mask = 0xFFFFFFFF << (32-prefix);
+        struct in_addr subnet_network_address_ipv4;
+        uint32_t ipv4_bin = ntohl(ipv4_binary.s_addr);
+        subnet_network_address_ipv4.s_addr = mask & ipv4_bin;
+        subnet_network_address_ipv4.s_addr = htonl(subnet_network_address_ipv4.s_addr);
 
-        const uint32_t mask = (2^32 - 1) << (32-prefix);
-        struct in_addr subnet_network;
-        subnet_network.s_addr = mask & ipv4_binary.s_addr;
+        uint64_t host_count = (1ULL<<(32-prefix)) -2;
+        struct subnet *subnet_ptr = &config->subnets[config->subnet_count];
+        char ip_addr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &subnet_network_address_ipv4, ip_addr,INET_ADDRSTRLEN);
 
+        subnet_ptr->family = AF_INET;
+        subnet_ptr->prefix = prefix;
+        subnet_ptr->ipv4 = subnet_network_address_ipv4;
+        subnet_ptr->host_count = host_count;
+
+        config->subnet_count++;
 
     }
 
@@ -91,7 +108,8 @@ void argument_parser(int arg_count, char **arguments, struct program_interface *
                 subnet_address(optarg, config);
             case 'w':
                 config->interface = optarg;
-
+            case 'i':
+                config->interface = optarg;
             default:
         }
     }
@@ -101,6 +119,8 @@ void argument_parser(int arg_count, char **arguments, struct program_interface *
 
 int main(int argc, char **argv) {
     struct program_interface config;
+    config.subnet_count = 0;
+    config.timeout = 1000;
     argument_parser(argc, argv, &config);
 
     return 0;
