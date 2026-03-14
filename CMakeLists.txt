@@ -3,4 +3,7 @@ project(IPK C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(IPK main.c)
+add_executable(IPK
+        src/main.c)
+
+target_include_directories(IPK PRIVATE include)
