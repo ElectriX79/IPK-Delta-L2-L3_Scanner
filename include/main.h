@@ -8,13 +8,13 @@
 #define IPK_MAIN_H
 
 
-struct ethernet_header {
+struct __attribute__((packed)) ethernet_header {
     uint8_t ether_dest[6];
     uint8_t ether_src[6];
     uint16_t ether_type;
 };
 
-struct arp_header {
+struct __attribute__((packed)) arp_header {
     uint16_t htype;
     uint16_t ptype;
     uint8_t hlen;
@@ -23,11 +23,12 @@ struct arp_header {
     uint8_t sender_mac[6];
     uint32_t sender_ip;
     uint8_t target_mac[6];
-    uint8_t target_ip[4];
+    uint32_t target_ip;
 };
 
-struct arp_packet {
-    struct ethernet_header ethernet; 
+
+struct __attribute__((packed)) arp_packet {
+    struct ethernet_header ethernet;
     struct arp_header arp;
 };
 

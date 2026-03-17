@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <net/if.h>
 #include <linux/if_ether.h>
 #include <netpacket/packet.h>
@@ -75,8 +76,15 @@ void subnet_address(char *ip_address, struct program_interface *config) {
         subnet_network_address_ipv4.s_addr = mask & ipv4_bin;
 
         const uint32_t mask_broadcast = 0xFFFFFFFF >> (32-prefix);
+        ipv4_bin = htonl(ipv4_bin);
         ipv4_broadcast.s_addr = ipv4_bin | mask_broadcast;
         ipv4_broadcast.s_addr = htonl(ipv4_broadcast.s_addr);
+
+        char buffer[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &ipv4_bin,buffer, INET_ADDRSTRLEN);
+
+
+        printf("IP Address: %s", buffer);
 
 
         subnet_network_address_ipv4.s_addr = htonl(subnet_network_address_ipv4.s_addr);
@@ -139,11 +147,14 @@ void argument_parser(int arg_count, char **arguments, struct program_interface *
                 exit(0);
             case 's':
                 subnet_address(optarg, config);
+                break;
             case 'w':
-                config->interface = optarg;
+                config->timeout = atoi(optarg);
+                break;
             case 'i':
                 config->interface = optarg;
                 get_interface_info(config);
+
             default:
         }
     }
@@ -165,7 +176,7 @@ int create_raw_socket(struct program_interface *config, struct sockaddr_ll *devi
     device->sll_halen = ETH_ALEN;
     device->sll_ifindex = if_nametoindex(config->interface);
     if(device->sll_ifindex == 0) {
-        perror("if_nametoindex");
+        fprintf(stderr, "Interface %s not found\n", config->interface);
         exit(EXIT_FAILURE);
     }
 
@@ -176,7 +187,6 @@ int create_raw_socket(struct program_interface *config, struct sockaddr_ll *devi
 
 
 int main(int argc, char **argv) {
-
     // Global interface to store relevant network configuration
     struct program_interface config = {0};
 
@@ -207,6 +217,9 @@ int main(int argc, char **argv) {
 
     memset(arp_hdr.target_mac, 0,6);
 
+    // Packet header containing Ethernet and ARP header merged (structure prepared to be sent by socket)
+    struct arp_packet packet = {0};
+
     // Ethernet header initial configuration (ipv4)
     memset(eth_hdr_ipv4.ether_dest, 0xff, 6);
     memcpy(eth_hdr_ipv4.ether_src, config.mac_addr, 6);
@@ -215,11 +228,43 @@ int main(int argc, char **argv) {
     // Ethernet header initial configuration (ipv6)
     memset(eth_hdr_ipv6.ether_dest, 0xff, 6);
     memcpy(eth_hdr_ipv6.ether_src, config.mac_addr, 6);
-    eth_hdr_ipv4.ether_type = htons(ETH_P_IPV6);
+    eth_hdr_ipv6.ether_type = htons(ETH_P_IPV6);
+
+    // Packet header ethernet, arp frames being set
+    packet.ethernet = eth_hdr_ipv4;
+    packet.arp = arp_hdr;
 
     // Creating raw socket for sending packets into network
     struct sockaddr_ll device;
     int sock_raw = create_raw_socket(&config, &device);
+    printf("Subnet count : %u\n", config.subnet_count);
+    printf("Host count : %lu\n", config.subnets[0].host_count);
+
+    // Iterating through subnets (ipv4)
+    for(uint32_t i = 0; i <config.subnet_count; i++) {
+        struct subnet *s = &config.subnets[i];
+
+        if(s->family != AF_INET) {
+            continue;
+        }
+        uint32_t first = ntohl(s->ip.ipv4.s_addr) + 1;
+        uint32_t last = ntohl(s->ipv4_broadcast.s_addr) - 1;
+        printf("First %u\n Last: %u\n", first,last);
+
+
+        // Iterating through every address of given subnet network
+        int count = 0;
+
+        for(uint32_t ip_target = first; ip_target < last; ip_target++) {
+            packet.arp.target_ip = htonl(ip_target);
+            ssize_t ret = sendto(sock_raw, &packet,sizeof(packet),0,(struct sockaddr *)&device,sizeof(device));
+            if(ret < 0) {
+                perror("sendto");
+            }
+
+
+        }
+    }
 
     return 0;
 
