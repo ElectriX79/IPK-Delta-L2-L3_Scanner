@@ -3,6 +3,7 @@
 //
 
 #include <netinet/in.h>
+#include <stdbool.h>
 
 #ifndef IPK_MAIN_H
 #define IPK_MAIN_H
@@ -54,7 +55,21 @@ struct program_interface {
 
     int timeout;
     struct subnet subnets[100];
+    uint64_t total_hostcount;
     uint32_t subnet_count;
+};
+
+struct host {
+    int family;
+    union {
+        uint32_t ipv4;
+        struct in6_addr ipv6;
+    }ip;
+    bool arp_ok;
+    bool ndp_ok;
+    bool incp_ok;
+    uint8_t mac_addr[6];
+
 };
 
 void argument_parser(int arg_count, char **argv, struct program_interface *config);

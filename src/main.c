@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -75,17 +76,9 @@ void subnet_address(char *ip_address, struct program_interface *config) {
         uint32_t ipv4_bin = ntohl(ipv4_binary.s_addr);
         subnet_network_address_ipv4.s_addr = mask & ipv4_bin;
 
-        const uint32_t mask_broadcast = 0xFFFFFFFF >> (32-prefix);
-        ipv4_bin = htonl(ipv4_bin);
+        const uint32_t mask_broadcast = 0xFFFFFFFF >> prefix;
         ipv4_broadcast.s_addr = ipv4_bin | mask_broadcast;
         ipv4_broadcast.s_addr = htonl(ipv4_broadcast.s_addr);
-
-        char buffer[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &ipv4_bin,buffer, INET_ADDRSTRLEN);
-
-
-        printf("IP Address: %s", buffer);
-
 
         subnet_network_address_ipv4.s_addr = htonl(subnet_network_address_ipv4.s_addr);
 
@@ -100,6 +93,7 @@ void subnet_address(char *ip_address, struct program_interface *config) {
         subnet_ptr->host_count = host_count;
         subnet_ptr->ipv4_broadcast = ipv4_broadcast;
         config->subnet_count++;
+        config->total_hostcount += host_count;
 
     }
 }
@@ -237,8 +231,10 @@ int main(int argc, char **argv) {
     // Creating raw socket for sending packets into network
     struct sockaddr_ll device;
     int sock_raw = create_raw_socket(&config, &device);
-    printf("Subnet count : %u\n", config.subnet_count);
-    printf("Host count : %lu\n", config.subnets[0].host_count);
+
+    // Allocating space for every scanned host
+    struct host *hosts = calloc(config.total_hostcount, sizeof(struct host));
+    // TODO DONT FORGET TO FREE SPACE AFTER PROGRAM COMES TO END
 
     // Iterating through subnets (ipv4)
     for(uint32_t i = 0; i <config.subnet_count; i++) {
@@ -249,23 +245,49 @@ int main(int argc, char **argv) {
         }
         uint32_t first = ntohl(s->ip.ipv4.s_addr) + 1;
         uint32_t last = ntohl(s->ipv4_broadcast.s_addr) - 1;
-        printf("First %u\n Last: %u\n", first,last);
-
 
         // Iterating through every address of given subnet network
-        int count = 0;
 
         for(uint32_t ip_target = first; ip_target < last; ip_target++) {
             packet.arp.target_ip = htonl(ip_target);
             ssize_t ret = sendto(sock_raw, &packet,sizeof(packet),0,(struct sockaddr *)&device,sizeof(device));
             if(ret < 0) {
                 perror("sendto");
+
+            }
+        }
+        uint8_t buffer[100];
+        time_t start = time(NULL);
+
+        while(time(NULL) - start < config.timeout) {
+            ssize_t len = recvfrom(sock_raw, buffer, sizeof(buffer),0,NULL,NULL);
+
+            if(len<0) {
+                perror("recvfrom");
+                continue;
+            }
+            struct arp_packet *pkt = (struct arp_packet *)buffer;
+
+            if(ntohs(pkt->arp.opcode) != 2) {
+                continue;
+            }
+            if(memcmp(pkt->arp.target_mac, config.mac_addr,6) != 0 || pkt->arp.target_ip != config.ip.ipv4.s_addr) {
+                continue;
+            }
+            uint32_t ip = ntohl(pkt->arp.sender_ip);
+            if(ip < first || ip > last) {
+                continue;
+            }
+            uint32_t index = ip - first;
+
+            if(!hosts[index].arp_ok) {
+                hosts[index].arp_ok = true;
+                hosts[index].ip.ipv4 = ip;
+                memcpy(hosts[index].mac_addr, pkt->arp.sender_mac,6);
+                printf("ARP ok: %u\n", ip);
             }
 
-
         }
+        return 0;
     }
-
-    return 0;
-
 }
