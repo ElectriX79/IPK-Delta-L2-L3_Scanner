@@ -48,7 +48,57 @@ void subnet_address(char *ip_address, struct program_interface *config) {
 
     if(strchr(ip_address, ':') != NULL) {
         // IPv6 address, TO DO XXXXXXXXXXXXXXXXXXXXXXXXXX
-        printf("");
+        char *slash = strchr(ip_address, '/');
+        if(!slash) {
+            fprintf(stderr, "Missing slash (prefix) in ip address");
+            exit(EXIT_FAILURE);
+        }
+        *slash = '\0';
+        int prefix = atoi(slash+1);
+
+        if(prefix < 110 || prefix >= 128) {
+            fprintf(stderr,"prefix too small, computationally difficult to process all hosts!!!");
+            exit(EXIT_FAILURE);
+        }
+        uint64_t host_count = 1ULL << (128-prefix);
+
+        struct in6_addr ipv6;
+
+        int ret = inet_pton(AF_INET6,ip_address, &ipv6);
+        if(ret == 0) {
+            fprintf(stderr, "Invalid format of IPv6 address");
+            exit(EXIT_FAILURE);
+        }
+        if(ret == -1) {
+            perror("inet_pton");
+            exit(EXIT_FAILURE);
+        }
+        uint32_t value;
+        memcpy(&value, &ipv6.s6_addr[12],4);
+        value = ntohl(value);
+        const uint32_t mask = 0xFFFFFFFF << (128-prefix);
+        value &= mask;
+        value = htonl(value);
+        memcpy(&ipv6.s6_addr[12],&value,4);
+
+        struct subnet *ipv6_network_ptr = &config->subnets[config->subnet_count];
+
+        ipv6_network_ptr->family = AF_INET6;
+        ipv6_network_ptr->prefix = prefix;
+        ipv6_network_ptr->ip.ipv6 = ipv6;
+        ipv6_network_ptr->host_count = host_count;
+
+
+
+
+
+
+
+
+
+
+
+
     }
 
     else {
@@ -56,6 +106,7 @@ void subnet_address(char *ip_address, struct program_interface *config) {
         char *slash = strchr(ip_address, '/');
         if(!slash) {
             printf("Invalid subnet");
+            exit(EXIT_FAILURE);
         }
         *slash = '\0';
 
@@ -69,7 +120,8 @@ void subnet_address(char *ip_address, struct program_interface *config) {
         struct in_addr ipv4_binary;
         struct in_addr ipv4_broadcast;
         if(inet_pton(AF_INET,ip_address,&ipv4_binary) != 1) {
-            printf("Invalid format of IPv4 address, Template: xxx.xxx.xxx.xxx/zz, where zz is prefix\n");
+            perror("Invalid format of IPv4 address, Template: xxx.xxx.xxx.xxx/zz, where zz is prefix\n");
+            exit(EXIT_FAILURE);
         }
         const uint32_t mask = 0xFFFFFFFF << (32-prefix);
         struct in_addr subnet_network_address_ipv4;
@@ -84,8 +136,7 @@ void subnet_address(char *ip_address, struct program_interface *config) {
 
         uint64_t host_count = (1ULL<<(32-prefix)) -2;
         struct subnet *subnet_ptr = &config->subnets[config->subnet_count];
-        char ip_addr[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &subnet_network_address_ipv4, ip_addr,INET_ADDRSTRLEN);
+
 
         subnet_ptr->family = AF_INET;
         subnet_ptr->prefix = prefix;

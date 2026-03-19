@@ -41,7 +41,6 @@ struct subnet {
         struct in6_addr ipv6;
     }ip;
     struct in_addr ipv4_broadcast;
-    struct in6_addr ipv6_broadcast;
     uint64_t host_count;
 };
 
