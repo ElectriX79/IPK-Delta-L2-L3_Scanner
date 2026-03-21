@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/socket.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
+#include <sys/time.h>
 #include <time.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
@@ -51,6 +54,25 @@ uint16_t checksum(uint16_t *buf, int len) {
     return ~sum;
 }
 
+uint16_t icmp_checksum(void *buf, int len) {
+    uint32_t sum = 0;
+    uint16_t *data = buf;
+
+    while (len > 1) {
+        sum += *data++;
+        len -= 2;
+    }
+
+    if (len == 1) {
+        sum += *(uint8_t*)data;
+    }
+
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+
+    return ~sum;
+}
+
 uint16_t icmp6_checksum(struct ip6_hdr *ip6, uint8_t *icmp, int len) {
     struct {
         struct in6_addr src;
@@ -72,6 +94,125 @@ uint16_t icmp6_checksum(struct ip6_hdr *ip6, uint8_t *icmp, int len) {
     memcpy(buf + sizeof(pseudo), icmp, len);
 
     return checksum((uint16_t *)buf, sizeof(pseudo) + len);
+}
+
+void icmp_system(struct program_interface *config, struct host *hosts)
+{
+    int sock4 = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    int sock6 = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+
+    if (sock4 < 0 || sock6 < 0) {
+        perror("socket ICMP");
+        return;
+    }
+
+    // ===== SEND =====
+    for (uint32_t i = 0; i < config->total_hostcount; i++) {
+
+        hosts[i].icmp_ok = false;
+
+        // ===== IPv4 =====
+        if (hosts[i].family == AF_INET) {
+
+            struct sockaddr_in addr = {0};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = hosts[i].ip.ipv4;
+
+            struct icmphdr icmp = {0};
+            icmp.type = ICMP_ECHO;
+            icmp.code = 0;
+            icmp.un.echo.id = htons(1234);
+            icmp.un.echo.sequence = htons(i);
+
+            icmp.checksum = icmp_checksum(&icmp, sizeof(icmp));
+
+            sendto(sock4, &icmp, sizeof(icmp), 0,
+                   (struct sockaddr*)&addr, sizeof(addr));
+        }
+
+        // ===== IPv6 =====
+        else if (hosts[i].family == AF_INET6) {
+
+            struct sockaddr_in6 addr6 = {0};
+            addr6.sin6_family = AF_INET6;
+            addr6.sin6_addr = hosts[i].ip.ipv6;
+
+            struct icmp6_hdr icmp6 = {0};
+            icmp6.icmp6_type = ICMP6_ECHO_REQUEST;
+            icmp6.icmp6_code = 0;
+            icmp6.icmp6_id = htons(1234);
+            icmp6.icmp6_seq = htons(i);
+
+            // checksum robí kernel
+            sendto(sock6, &icmp6, sizeof(icmp6), 0,
+                   (struct sockaddr*)&addr6, sizeof(addr6));
+        }
+    }
+
+    // ===== RECEIVE =====
+    uint8_t buffer[1500];
+
+    struct timeval start, now;
+    gettimeofday(&start, NULL);
+
+    while (1) {
+
+        gettimeofday(&now, NULL);
+        int elapsed = (now.tv_sec - start.tv_sec) * 1000 +
+                      (now.tv_usec - start.tv_usec) / 1000;
+
+        if (elapsed > config->timeout)
+            break;
+
+        // ===== IPv4 RECV =====
+        ssize_t len4 = recv(sock4, buffer, sizeof(buffer), MSG_DONTWAIT);
+
+        if (len4 > 0) {
+            struct iphdr *ip = (struct iphdr*)buffer;
+            struct icmphdr *icmp = (struct icmphdr*)(buffer + ip->ihl*4);
+
+            if (icmp->type == ICMP_ECHOREPLY) {
+
+                uint32_t ip_src = ip->saddr;
+
+                for (uint32_t i = 0; i < config->total_hostcount; i++) {
+                    if (hosts[i].family == AF_INET &&
+                        hosts[i].ip.ipv4 == ip_src) {
+
+                        hosts[i].icmp_ok = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // ===== IPv6 RECV =====
+        ssize_t len6 = recv(sock6, buffer, sizeof(buffer), MSG_DONTWAIT);
+
+        if (len6 > 0) {
+            struct icmp6_hdr *icmp6 = (struct icmp6_hdr*)buffer;
+
+            if (icmp6->icmp6_type == ICMP6_ECHO_REPLY) {
+
+                struct sockaddr_in6 addr6;
+                socklen_t addrlen = sizeof(addr6);
+
+                getpeername(sock6, (struct sockaddr*)&addr6, &addrlen);
+
+                for (uint32_t i = 0; i < config->total_hostcount; i++) {
+                    if (hosts[i].family == AF_INET6 &&
+                        memcmp(&hosts[i].ip.ipv6, &addr6.sin6_addr, sizeof(struct in6_addr)) == 0) {
+
+                        hosts[i].icmp_ok = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    close(sock4);
+    close(sock6);
 }
 
 void ndp_system(struct program_interface *config,
@@ -327,6 +468,7 @@ void subnet_address(char *ip_address, struct program_interface *config) {
     }
 }
 
+
 void get_interface_info(struct program_interface *config) {
 
     struct ifaddrs *ifaddr, *ifa;
@@ -536,25 +678,8 @@ int main(int argc, char **argv) {
         arp_system(&config, &packet, sock_raw, &device,hosts);
 
         ndp_system(&config, sock_raw, &device, hosts);
-        for(int i = 0; i < config.total_hostcount;i++) {
-            if(hosts[i].family == AF_INET) {
-                if(hosts[i].arp_ok) {
-                    printf("ARP: ok (%u)\n", hosts[i].ip.ipv4);
-                }
-                else {
-                    printf("ARP: failed (%u)\n", hosts[i].ip.ipv4);
-                }
-            }
-            else if(hosts[i].family == AF_INET6) {
-                if(hosts[i].ndp_ok) {
-                    printf("NDP: ok");
-                }
-                else {
-                    printf("NDP: failed");
-                }
-            }
+        icmp_system(&config, hosts);
 
-        }
 
 
 
