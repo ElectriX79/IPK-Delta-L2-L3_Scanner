@@ -5,51 +5,56 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <netinet/ip6.h>
-#include <netinet/icmp6.h> /
+#include <netinet/icmp6.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <sys/socket.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
+#include <sys/time.h>
+#include <time.h>
+#include <net/if_arp.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <linux/if_ether.h>
+#include <netpacket/packet.h>
+#include <ifaddrs.h>
+#include <unistd.h>
+#include <sys/types.h>
 
 #ifndef IPK_MAIN_H
 #define IPK_MAIN_H
 
-struct __attribute__((packed)) icmpv6_ns {
-    uint8_t type;      // 135
-    uint8_t code;      // 0
+
+
+
+struct __attribute__((packed)) ipv6_header {
+    uint32_t ver_tc_fl;
+    uint16_t payload_length;
+    uint8_t next_header;
+    uint8_t hop_limit;
+    struct in6_addr source_ipv6;
+    struct in6_addr destination_ipv6;
+
+};
+
+struct __attribute__((packed)) icmp_v6 {
+    uint8_t type;
+    uint8_t code;
     uint16_t checksum;
     uint32_t reserved;
     struct in6_addr target;
 };
 
-struct __attribute__((packed)) icmpv6_na {
-    uint8_t type;      // 136
-    uint8_t code;
-    uint16_t checksum;
-    uint32_t flags;
-    struct in6_addr target;
-};
-
 struct __attribute__((packed)) ndp_option {
     uint8_t type;
-    uint8_t length; // in units of 8 bytes
-};
-
-struct __attribute__((packed)) ndp_opt_slla {
-    uint8_t type;    // 1
-    uint8_t length;  // 1 (8 bytes total)
+    uint8_t length;
     uint8_t mac[6];
-};
-
-struct __attribute__((packed)) ndp_opt_tlla {
-    uint8_t type;    // 2
-    uint8_t length;  // 1
-    uint8_t mac[6];
-};
-
-
-struct __attribute__((packed)) icmpv6_echo {
-    uint8_t type;      // 128 request, 129 reply
-    uint8_t code;
-    uint16_t checksum;
-    uint16_t id;
-    uint16_t seq;
 };
 
 
@@ -59,12 +64,14 @@ struct __attribute__((packed)) ethernet_header {
     uint16_t ether_type;
 };
 
-struct __attribute__((packed)) ndp_ns_packet {
-    struct ethernet_header ethernet;
-    struct ip6_hdr ipv6;
-    struct icmpv6_ns ns;
-    struct ndp_opt_slla option;
+struct __attribute__((packed)) ndp_pkt {
+    struct ethernet_header ethernet_hdr;
+    struct ipv6_header ip6_hdr;
+    struct icmp_v6 icmp_hdr;
+    struct ndp_option ndp_options;
 };
+
+
 
 struct __attribute__((packed)) arp_header {
     uint16_t htype;
@@ -122,9 +129,8 @@ struct host {
 
 };
 
+
 void argument_parser(int arg_count, char **argv, struct program_interface *config);
-
-
 
 
 #endif //IPK_MAIN_H
