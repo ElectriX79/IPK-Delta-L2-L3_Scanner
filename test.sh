@@ -1,96 +1,126 @@
 #!/bin/bash
 
-# COLORS
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-YELLOW="\033[1;33m"
-NC="\033[0m"
+set -e
 
-PASS=0
-FAIL=0
+BIN=./ipk-L2L3-scan
+IFACE=br0
 
-cd cmak-build-debug
+fail=0
 
-function run_test() {
-    NAME=$1
-    CMD=$2
-    EXPECT=$3
+echo "===== CLEANUP (PREVIOUS RUN) ====="
+for i in {1..10}; do
+    sudo ip netns del ns$i 2>/dev/null || true
+done
+sudo ip link del br0 2>/dev/null || true
 
-    echo -e "${YELLOW}Running: $NAME${NC}"
+echo "===== SETUP NETWORK ====="
 
-    OUTPUT=$(eval $CMD 2>/dev/null)
+# bridge
+sudo ip link add name br0 type bridge
+sudo ip link set br0 up
 
-    if echo "$OUTPUT" | grep -q "$EXPECT"; then
-        echo -e "${GREEN}PASS${NC}"
-        PASS=$((PASS+1))
-    else
-        echo -e "${RED}FAIL${NC}"
-        echo "Expected: $EXPECT"
-        echo "Got:"
-        echo "$OUTPUT"
-        FAIL=$((FAIL+1))
-    fi
+# IPv6 + IPv4 for root
+sudo ip addr add fd00::1/120 dev br0
+sudo ip addr add 192.168.100.1/24 dev br0
 
-    echo "-----------------------------"
-}
+# create 10 hosts
+for i in {1..10}; do
+    sudo ip netns add ns$i
 
-echo "===== BUILD ====="
-make clean && make
+    sudo ip link add veth$i type veth peer name veth${i}br
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}BUILD FAILED${NC}"
-    exit 1
-fi
+    sudo ip link set veth$i netns ns$i
+    sudo ip link set veth${i}br master br0
 
-echo -e "${GREEN}BUILD OK${NC}"
-echo "============================="
+    sudo ip link set veth${i}br up
+    sudo ip netns exec ns$i ip link set veth$i up
 
-# =============================
-# TESTS
-# =============================
+    # IPv6
+    sudo ip netns exec ns$i ip addr add fd00::$(($i+1))/120 dev veth$i
 
-# 1. Help
-run_test "Help flag" "./ipk-L2L3-scan -h" "Scanning ranges"
+    # IPv4
+    sudo ip netns exec ns$i ip addr add 192.168.100.$(($i+1))/24 dev veth$i
+done
 
-# 2. Invalid input
-run_test "Invalid subnet" "./ipk-L2L3-scan -i lo -s invalid" "Invalid"
+sleep 1
 
-# 3. IPv4 parsing
-run_test "IPv4 parsing" \
-"sudo ./ipk-L2L3-scan -i lo -s 127.0.0.0/30" \
-"Scanning ranges"
+echo "===== TEST A: ARGUMENT PARSING ====="
 
-# 4. IPv6 parsing
-run_test "IPv6 parsing" \
-"sudo ./ipk-L2L3-scan -i lo -s ::1/128" \
-"Scanning ranges"
+echo "A1: help"
+$BIN -h | grep -q "Usage" || fail=1
 
-# 5. ARP basic test (loopback nebude odpovedať → FAIL OK)
-run_test "ARP basic" \
-"sudo ./ipk-L2L3-scan -i lo -s 127.0.0.0/30" \
-"arp"
+echo "A2: no args"
+if $BIN >/dev/null 2>&1; then fail=1; fi
 
-# 6. ICMP localhost
-run_test "ICMP localhost" \
-"sudo ./ipk-L2L3-scan -i lo -s 127.0.0.1/32" \
-"icmpv4"
+echo "A3: interface list"
+$BIN -i >/dev/null || fail=1
 
-# 7. IPv6 ICMP localhost
-run_test "ICMPv6 localhost" \
-"sudo ./ipk-L2L3-scan -i lo -s ::1/128" \
-"icmpv6"
+echo "A4: invalid interface"
+if $BIN -i fake0 -s fd00::/120 >/dev/null 2>&1; then fail=1; fi
 
-# =============================
-# SUMMARY
-# =============================
+echo "A5: invalid subnet"
+if $BIN -i $IFACE -s fd00:: >/dev/null 2>&1; then fail=1; fi
 
-echo ""
-echo "===== SUMMARY ====="
-echo -e "${GREEN}PASS: $PASS${NC}"
-echo -e "${RED}FAIL: $FAIL${NC}"
+echo "===== TEST B: OUTPUT FORMAT ====="
 
-if [ $FAIL -eq 0 ]; then
-    echo -e "${GREEN}ALL TESTS PASSED 🎉${NC}"
+OUT=$(sudo $BIN -i $IFACE -s fd00::2/128)
+
+echo "$OUT" | grep -q "Scanning ranges:" || fail=1
+echo "$OUT" | grep -q "^$" || fail=1
+
+echo "===== TEST C: IPv4 (ARP + ICMPv4) ====="
+
+echo "C1: single host"
+OUT=$(sudo $BIN -i $IFACE -s 192.168.100.2/32)
+
+echo "$OUT" | grep -q "arp OK" || fail=1
+echo "$OUT" | grep -q "icmpv4 OK" || fail=1
+
+echo "C2: multi host"
+OUT=$(sudo $BIN -i $IFACE -s 192.168.100.0/24)
+
+echo "$OUT" | grep -q "arp OK" || fail=1
+COUNT=$(echo "$OUT" | grep -c "arp OK")
+if [ "$COUNT" -lt 5 ]; then fail=1; fi
+
+echo "C3: timeout"
+OUT=$(sudo $BIN -i $IFACE -w 1 -s 192.168.100.0/24)
+
+echo "$OUT" | grep -q "FAIL" || fail=1
+
+echo "===== TEST D: IPv6 (NDP + ICMPv6) ====="
+
+echo "D1: single host"
+OUT=$(sudo $BIN -i $IFACE -s fd00::2/128)
+
+echo "$OUT" | grep -q "ndp OK" || fail=1
+echo "$OUT" | grep -q "icmpv6 OK" || fail=1
+
+echo "D2: multi host"
+OUT=$(sudo $BIN -i $IFACE -s fd00::/120)
+
+echo "$OUT" | grep -q "ndp OK" || fail=1
+COUNT=$(echo "$OUT" | grep -c "ndp OK")
+if [ "$COUNT" -lt 5 ]; then fail=1; fi
+
+echo "D3: timeout"
+OUT=$(sudo $BIN -i $IFACE -w 1 -s fd00::/120)
+
+echo "$OUT" | grep -q "FAIL" || fail=1
+
+echo "===== CLEANUP ====="
+
+for i in {1..10}; do
+    sudo ip netns del ns$i 2>/dev/null || true
+done
+sudo ip link del br0 2>/dev/null || true
+
+echo "===== RESULT ====="
+
+if [ $fail -eq 0 ]; then
+    echo "ALL TESTS PASSED"
+    exit 0
 else
-    echo -e "${RED}SOME TESTS FAILED ❌${NC}"
+    echo "TESTS FAILED"
+    exit 1
 fi

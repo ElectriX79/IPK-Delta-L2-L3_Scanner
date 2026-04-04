@@ -2,6 +2,8 @@
 #include "../include/main.h"
 #include "../include/helper_functions.h"
 
+
+
 void print_usage() {
     printf("Usage:\n");
     printf("  ./ipk-L2L3-scan -i INTERFACE [-s SUBNET]... [-w TIMEOUT] [-h | --help]\n\n");
@@ -13,21 +15,24 @@ void print_usage() {
     printf("  -s <subnet>      Subnet to scan (IPv4 or IPv6)\n");
     printf("                   Example: 192.168.1.0/24 or fd00::/120\n");
     printf("                   Can be used multiple times\n\n");
-
     printf("  -w <timeout>     Timeout in ms (default: 1000)\n\n");
 
     printf("  -h, --help       Show this help message\n");
 }
 
 
+/**
+ * @brief Outputs every available network interface within device.
+ * Function uses getifaddrs which returns linked list of all available network interfaces
+ */
 void print_interfaces() {
     struct ifaddrs *ifaddr, *ifa;
     if(getifaddrs(&ifaddr)==-1) {
-        fprintf(stderr,"getifaddrs");
+        perror("getifaddrs");
     }
     ifa = ifaddr;
     while(ifa != NULL) {
-        if(ifa->ifa_addr->sa_family == AF_PACKET) {
+        if(ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
             char *name = ifa->ifa_name;
             printf("%s\n", name);
         }
@@ -36,163 +41,241 @@ void print_interfaces() {
     freeifaddrs(ifaddr);
 }
 
+/**
+ * Parses subnet string (IPv4 or IPv6) and stores
+ * computed network info into program configuration.
+ *
+ * The function:
+ *  - detects whether the input is IPv4 or IPv6
+ *  - extracts prefix length
+ *  - computes network address
+ *  - calculates number of hosts
+ *  - stores everything into config->subnets
+ *
+ * IPv6 is limited to prefix >= 110 to avoid scanning extremely large networks.
+ */
 void subnet_address(char *ip_address, struct program_interface *config) {
 
-
+    // If address contains ':' → IPv6, otherwise IPv4
     if(strchr(ip_address, ':') != NULL) {
-        // IPv6 address
+
         char *slash = strchr(ip_address, '/');
         if(!slash) {
-            fprintf(stderr, "Missing slash (prefix) in ip address");
+            fprintf(stderr, "Missing prefix (/) in IP address\n");
             exit(EXIT_FAILURE);
         }
+
         *slash = '\0';
         int prefix = atoi(slash+1);
 
+        // Prevent scanning too many IPv6 hosts
         if(prefix < 110 || prefix > 128) {
-            fprintf(stderr,"prefix too small, computationally difficult to process all hosts!!!");
+            fprintf(stderr,"IPv6 prefix too small\n");
             exit(EXIT_FAILURE);
         }
+
         uint64_t host_count = 1ULL << (128-prefix);
 
         struct in6_addr ipv6;
 
-        int ret = inet_pton(AF_INET6,ip_address, &ipv6);
-        if(ret == 0) {
-            fprintf(stderr, "Invalid format of IPv6 address");
+        // Convert string IPv6 → binary form
+        int ret = inet_pton(AF_INET6, ip_address, &ipv6);
+        if(ret <= 0) {
+            perror("Invalid IPv6 address");
             exit(EXIT_FAILURE);
         }
-        if(ret == -1) {
-            perror("inet_pton");
-            exit(EXIT_FAILURE);
-        }
+
+        // Compute network address by clearing host bits
+        // (only last 32 bits are modified here - simplified solution)
         uint32_t value;
-        memcpy(&value, &ipv6.s6_addr[12],4);
+        memcpy(&value, &ipv6.s6_addr[12], 4);
+
         value = ntohl(value);
-        const uint32_t mask = 0xFFFFFFFF << (128-prefix);
+
+        const uint32_t mask = 0xFFFFFFFF << (128 - prefix);
         value &= mask;
+
         value = htonl(value);
-        memcpy(&ipv6.s6_addr[12],&value,4);
+        memcpy(&ipv6.s6_addr[12], &value, 4);
 
-        struct subnet *ipv6_network_ptr = &config->subnets[config->subnet_count];
+        // Store subnet into config
+        struct subnet *ptr = &config->subnets[config->subnet_count];
 
-        ipv6_network_ptr->family = AF_INET6;
-        ipv6_network_ptr->prefix = prefix;
-        ipv6_network_ptr->ip.ipv6 = ipv6;
-        ipv6_network_ptr->host_count = host_count;
+        ptr->family = AF_INET6;
+        ptr->prefix = prefix;
+        ptr->ip.ipv6 = ipv6;
+        ptr->host_count = host_count;
+
         config->subnet_count++;
         config->total_hostcount += host_count;
     }
 
     else {
-        // IPv4 address
+        // IPv4 branch
+
         char *slash = strchr(ip_address, '/');
         if(!slash) {
-            printf("Invalid subnet");
+            printf("Invalid subnet\n");
             exit(EXIT_FAILURE);
         }
-        *slash = '\0';
 
+        *slash = '\0';
         int prefix = atoi((slash+1));
 
-        if(prefix > 32 || prefix <0) {
+        if(prefix > 32 || prefix < 0) {
             printf("Invalid prefix\n");
             exit(1);
         }
 
         struct in_addr ipv4_binary;
         struct in_addr ipv4_broadcast;
-        if(inet_pton(AF_INET,ip_address,&ipv4_binary) != 1) {
-            perror("Invalid format of IPv4 address, Template: xxx.xxx.xxx.xxx/zz, where zz is prefix\n");
+
+        // Convert string IPv4 → binary
+        if(inet_pton(AF_INET, ip_address, &ipv4_binary) != 1) {
+            perror("Invalid IPv4 format");
             exit(EXIT_FAILURE);
         }
-        const uint32_t mask = 0xFFFFFFFF << (32-prefix);
-        struct in_addr subnet_network_address_ipv4;
+
         uint32_t ipv4_bin = ntohl(ipv4_binary.s_addr);
-        subnet_network_address_ipv4.s_addr = mask & ipv4_bin;
 
+        // Compute network address (zero host bits)
+        const uint32_t mask = 0xFFFFFFFF << (32 - prefix);
+        struct in_addr network;
+        network.s_addr = htonl(mask & ipv4_bin);
+
+        // Compute broadcast address (set host bits to 1)
         const uint32_t mask_broadcast = 0xFFFFFFFF >> prefix;
-        ipv4_broadcast.s_addr = ipv4_bin | mask_broadcast;
-        ipv4_broadcast.s_addr = htonl(ipv4_broadcast.s_addr);
+        ipv4_broadcast.s_addr = htonl(ipv4_bin | mask_broadcast);
 
-        subnet_network_address_ipv4.s_addr = htonl(subnet_network_address_ipv4.s_addr);
+        // Number of usable hosts (excluding network + broadcast)
+        uint64_t host_count = (1ULL << (32 - prefix)) - 2;
 
-
-
-        uint64_t host_count = (1ULL<<(32-prefix)) -2;
+        // Special case: /32 = single host
         if (prefix == 32) {
             host_count = 1;
         }
-        struct subnet *subnet_ptr = &config->subnets[config->subnet_count];
 
+        struct subnet *ptr = &config->subnets[config->subnet_count];
 
-        subnet_ptr->family = AF_INET;
-        subnet_ptr->prefix = prefix;
-        subnet_ptr->ip.ipv4 = subnet_network_address_ipv4;
-        subnet_ptr->host_count = host_count;
-        subnet_ptr->ipv4_broadcast = ipv4_broadcast;
+        ptr->family = AF_INET;
+        ptr->prefix = prefix;
+        ptr->ip.ipv4 = network;
+        ptr->host_count = host_count;
+        ptr->ipv4_broadcast = ipv4_broadcast;
+
         config->subnet_count++;
         config->total_hostcount += host_count;
-
     }
 }
 
 
+/**
+ * Retrieves IPv4, IPv6 and MAC address of selected network interface.
+ * Uses getifaddrs() and searches for matching interface name.
+ */
 void get_interface_info(struct program_interface *config) {
 
     struct ifaddrs *ifaddr, *ifa;
+
+    // Get linked list of all interfaces
     if(getifaddrs(&ifaddr) == -1) {
-        fprintf(stderr, "getifaddrs");
+        fprintf(stderr, "getifaddrs\n");
         exit(1);
-     }
-    for(ifa = ifaddr;ifa != NULL;ifa=ifa->ifa_next) {
+    }
+
+    // Iterate through all interfaces
+    for(ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+
+        // Skip entries without address
         if(ifa->ifa_addr == NULL) {
             continue;
         }
-        if(strcmp(ifa->ifa_name,config->interface) == 0) {
+
+        // Check if this is the interface we are looking for
+        if(strcmp(ifa->ifa_name, config->interface) == 0) {
+
+            // IPv4 address
             if(ifa->ifa_addr->sa_family == AF_INET) {
-                config->ipv4 = ((struct sockaddr_in *)(ifa->ifa_addr))->sin_addr;
+                config->ipv4 =
+                    ((struct sockaddr_in *)(ifa->ifa_addr))->sin_addr;
             }
+
+            // IPv6 address
             else if(ifa->ifa_addr->sa_family == AF_INET6) {
-                config->ipv6 = ((struct sockaddr_in6 *)(ifa->ifa_addr))->sin6_addr;
+                config->ipv6 =
+                    ((struct sockaddr_in6 *)(ifa->ifa_addr))->sin6_addr;
             }
+
+            // MAC address (link layer)
             else if(ifa->ifa_addr->sa_family == AF_PACKET) {
-                struct sockaddr_ll *s = (struct sockaddr_ll *)ifa->ifa_addr;
-                memcpy(config->mac_addr, s->sll_addr,6);
+                struct sockaddr_ll *s =
+                    (struct sockaddr_ll *)ifa->ifa_addr;
+
+                memcpy(config->mac_addr, s->sll_addr, 6);
             }
         }
     }
+
     freeifaddrs(ifaddr);
 }
 
+/**
+ * Parses command-line arguments using getopt().
+ *
+ * Handles:
+ *  - -i (interface)
+ *  - -s (subnet, can be used multiple times)
+ *  - -w (timeout)
+ *  - -h (help)
+ */
 void argument_parser(int arg_count, char **arguments, struct program_interface *config) {
+
+    // No arguments → show error + usage
     if (arg_count == 1) {
-        fprintf(stderr, "Error: No arguments entered, please read usage:");
+        fprintf(stderr, "Error: No arguments entered\n");
         print_usage();
         exit(1);
     }
-    else if(arg_count == 2 && (strcmp(arguments[1],"-i") == 0)) {
+
+    // Special case: only "-i" → list interfaces
+    else if(arg_count == 2 && (strcmp(arguments[1], "-i") == 0)) {
         print_interfaces();
         exit(0);
     }
 
     int opt;
-    while((opt = getopt(arg_count, arguments,"hi:w:s:")) != -1) {
+
+    // Process arguments using getopt
+    while((opt = getopt(arg_count, arguments, "hi:w:s:")) != -1) {
+
         switch(opt) {
+
+            // Help
             case 'h':
                 print_usage();
                 exit(0);
+
+                // Subnet (can be repeated)
             case 's':
                 subnet_address(optarg, config);
                 break;
+
+                // Timeout in ms
             case 'w':
                 config->timeout = atoi(optarg);
                 break;
+
+                // Interface name
             case 'i':
                 config->interface = optarg;
+
+                // Immediately load interface info (IP, MAC)
                 get_interface_info(config);
+                break;
 
             default:
+                // Unknown argument → ignore (getopt usually handles errors)
+                break;
         }
     }
 }
@@ -221,6 +304,10 @@ int create_raw_socket(struct program_interface *config, struct sockaddr_ll *devi
 }
 
 
+/**
+ * Sends ARP requests to all IPv4 hosts and processes ARP replies.
+ * Marks which hosts are alive and stores their MAC addresses.
+ */
 void arp_system(struct program_interface *config,
                 int sock_raw,
                 struct sockaddr_ll *device,
@@ -229,7 +316,7 @@ void arp_system(struct program_interface *config,
     struct ethernet_header eth_hdr_ipv4;
     struct arp_header arp_hdr;
 
-    // ===== ARP HEADER =====
+    // ===== Prepare ARP header =====
     arp_hdr.htype = htons(ARPHRD_ETHER);
     arp_hdr.ptype = htons(ETH_P_IP);
     arp_hdr.hlen = ETH_ALEN;
@@ -238,23 +325,26 @@ void arp_system(struct program_interface *config,
 
     memcpy(arp_hdr.sender_mac, config->mac_addr, 6);
     arp_hdr.sender_ip = config->ipv4.s_addr;
-    memset(arp_hdr.target_mac, 0, 6);
+    memset(arp_hdr.target_mac, 0, 6); // unknown
 
-    // ===== ETHERNET HEADER =====
-    memset(eth_hdr_ipv4.ether_dest, 0xff, 6);
+    // ===== Prepare Ethernet header =====
+    memset(eth_hdr_ipv4.ether_dest, 0xff, 6); // broadcast
     memcpy(eth_hdr_ipv4.ether_src, config->mac_addr, 6);
     eth_hdr_ipv4.ether_type = htons(ETH_P_ARP);
 
+    // Combine headers into one packet
     struct arp_packet packet = {0};
     packet.ethernet = eth_hdr_ipv4;
     packet.arp = arp_hdr;
 
     uint32_t global_index = 0;
 
+    // Iterate over all subnets
     for (uint32_t i = 0; i < config->subnet_count; i++) {
 
         struct subnet *s = &config->subnets[i];
 
+        // Skip non-IPv4 subnets
         if (s->family != AF_INET) {
             global_index += s->host_count;
             continue;
@@ -262,7 +352,7 @@ void arp_system(struct program_interface *config,
 
         uint32_t first, last;
 
-        // ===== EDGE CASES =====
+        // Compute host range depending on prefix
         if (s->prefix == 32) {
             first = ntohl(s->ip.ipv4.s_addr);
             last  = first;
@@ -276,7 +366,7 @@ void arp_system(struct program_interface *config,
             last  = ntohl(s->ipv4_broadcast.s_addr) - 1;
         }
 
-        // ===== SEND =====
+        // ===== SEND ARP REQUESTS =====
         for (uint64_t h = 0; h < s->host_count; h++) {
 
             uint32_t ip_target = first + h;
@@ -287,23 +377,28 @@ void arp_system(struct program_interface *config,
                 continue;
             }
 
+            // Set target IP in ARP request
             packet.arp.target_ip = htonl(ip_target);
 
-            ssize_t ret = sendto(sock_raw,&packet,sizeof(packet),0,(struct sockaddr *)device,sizeof(*device));
+            // Send packet
+            ssize_t ret = sendto(sock_raw, &packet, sizeof(packet), 0,
+                                 (struct sockaddr *)device, sizeof(*device));
 
             if (ret < 0) {
                 perror("sendto");
             }
 
+            // Initialize host entry
             hosts[idx].family = AF_INET;
             hosts[idx].arp_ok = false;
-            hosts[idx].ip.ipv4 = htonl(ip_target); // network order
+            hosts[idx].ip.ipv4 = htonl(ip_target);
         }
 
-        // ===== RECEIVE =====
+        // ===== RECEIVE ARP REPLIES =====
         uint8_t buffer[2048];
         time_t start = time(NULL);
 
+        // Wait for replies until timeout
         while ((time(NULL) - start) * 1000 < config->timeout) {
 
             ssize_t len = recvfrom(sock_raw, buffer, sizeof(buffer), 0, NULL, NULL);
@@ -314,12 +409,12 @@ void arp_system(struct program_interface *config,
 
             struct arp_packet *pkt = (struct arp_packet *)buffer;
 
-            // only ARP reply
+            // Only ARP replies
             if (ntohs(pkt->arp.opcode) != ARPOP_REPLY) {
                 continue;
             }
 
-            // must be for us
+            // Check if reply is for our MAC and IP
             if (memcmp(pkt->arp.target_mac, config->mac_addr, 6) != 0 ||
                 pkt->arp.target_ip != config->ipv4.s_addr) {
                 continue;
@@ -327,6 +422,7 @@ void arp_system(struct program_interface *config,
 
             uint32_t ip = ntohl(pkt->arp.sender_ip);
 
+            // Ignore addresses outside current subnet
             if (ip < first || ip > last) {
                 continue;
             }
@@ -337,9 +433,10 @@ void arp_system(struct program_interface *config,
                 continue;
             }
 
+            // Save result (only once)
             if (!hosts[index].arp_ok) {
                 hosts[index].arp_ok = true;
-                hosts[index].ip.ipv4 = pkt->arp.sender_ip; // network order
+                hosts[index].ip.ipv4 = pkt->arp.sender_ip;
                 memcpy(hosts[index].mac_addr, pkt->arp.sender_mac, 6);
             }
         }
@@ -349,6 +446,10 @@ void arp_system(struct program_interface *config,
 }
 
 
+/**
+ * Sends NDP (Neighbor Discovery) requests for IPv6 hosts
+ * and processes responses (Neighbor Advertisement).
+ */
 void ndp_system(struct program_interface *config,
                 struct sockaddr_ll *device,
                 int sock_raw,
@@ -357,43 +458,48 @@ void ndp_system(struct program_interface *config,
     struct ndp_pkt packet;
     memset(&packet, 0, sizeof(packet));
 
-    // ===== Ethernet =====
+    // ===== Ethernet header =====
     memcpy(packet.ethernet_hdr.ether_src, config->mac_addr, 6);
     packet.ethernet_hdr.ether_type = htons(ETH_P_IPV6);
 
-    // ===== IPv6 =====
-    packet.ip6_hdr.ver_tc_fl = htonl(6 << 28);
+    // ===== IPv6 header =====
+    packet.ip6_hdr.ver_tc_fl = htonl(6 << 28); // version = 6
     packet.ip6_hdr.payload_length =
         htons(sizeof(struct icmp_v6) + sizeof(struct ndp_option));
-    packet.ip6_hdr.next_header = 58;
-    packet.ip6_hdr.hop_limit = 255;
+    packet.ip6_hdr.next_header = 58; // ICMPv6
+    packet.ip6_hdr.hop_limit = 255;  // must be 255 for NDP
     packet.ip6_hdr.source_ipv6 = config->ipv6;
 
-    // ===== ICMPv6 =====
+    // ===== ICMPv6 (Neighbor Solicitation) =====
     packet.icmp_hdr.type = 135;
     packet.icmp_hdr.code = 0;
     packet.icmp_hdr.reserved = 0;
 
-    // ===== NDP Option =====
+    // ===== NDP option (source MAC) =====
     packet.ndp_options.type = 1;
     packet.ndp_options.length = 1;
     memcpy(packet.ndp_options.mac, config->mac_addr, 6);
 
     uint64_t global_index = 0;
 
+    // Iterate over all subnets
     for (uint32_t i = 0; i < config->subnet_count; i++) {
 
         struct subnet *s = &config->subnets[i];
 
-        // ================= SKIP IPv4 =================
+        // Skip non-IPv6 subnets
         if (s->family != AF_INET6) {
             global_index += s->host_count;
             continue;
         }
 
+        // Start from first host (network + 1)
         struct in6_addr current = s->ip.ipv6;
+        for (int b = 15; b >= 0; b--) {
+            if (++current.s6_addr[b] != 0) break;
+        }
 
-        // ================= SEND =================
+        // ===== SEND NDP REQUESTS =====
         for (uint64_t h = 0; h < s->host_count; h++) {
 
             uint64_t idx = global_index + h;
@@ -403,20 +509,18 @@ void ndp_system(struct program_interface *config,
                 continue;
             }
 
-            // ===== uloženie hosta =====
+            // Initialize host entry
             hosts[idx].family = AF_INET6;
             hosts[idx].ip.ipv6 = current;
             hosts[idx].ndp_ok = false;
 
-            // ===== target =====
+            // Target address in ICMPv6
             packet.icmp_hdr.target = current;
 
-            // ===== multicast IPv6 =====
-            struct in6_addr multicast;
-            memset(&multicast, 0, sizeof(multicast));
-
-            multicast.s6_addr[0] = 0xff;
-            multicast.s6_addr[1] = 0x02;
+            // Compute solicited-node multicast address (ff02::1:ffXX:XXXX)
+            struct in6_addr multicast = {0};
+            multicast.s6_addr[0]  = 0xff;
+            multicast.s6_addr[1]  = 0x02;
             multicast.s6_addr[11] = 0x01;
             multicast.s6_addr[12] = 0xff;
             multicast.s6_addr[13] = current.s6_addr[13];
@@ -425,17 +529,16 @@ void ndp_system(struct program_interface *config,
 
             packet.ip6_hdr.destination_ipv6 = multicast;
 
-            // ===== multicast MAC =====
+            // Convert multicast IPv6 → multicast MAC (33:33:ff:XX:XX:XX)
             uint8_t multicast_mac[6] = {
                 0x33, 0x33, 0xff,
                 current.s6_addr[13],
                 current.s6_addr[14],
                 current.s6_addr[15]
             };
-
             memcpy(packet.ethernet_hdr.ether_dest, multicast_mac, 6);
 
-            // ===== checksum =====
+            // Compute ICMPv6 checksum
             packet.icmp_hdr.checksum = 0;
             packet.icmp_hdr.checksum = icmpv6_checksum(
                 &packet.ip6_hdr.source_ipv6,
@@ -444,50 +547,65 @@ void ndp_system(struct program_interface *config,
                 sizeof(struct icmp_v6) + sizeof(struct ndp_option)
             );
 
-            // ===== send =====
+            // Send packet
             if (sendto(sock_raw, &packet, sizeof(packet), 0,
                        (struct sockaddr *)device, sizeof(*device)) < 0) {
                 perror("sendto");
             }
 
-            // ===== increment IPv6 =====
+            // Increment IPv6 address
             for (int b = 15; b >= 0; b--) {
                 if (++current.s6_addr[b] != 0) break;
             }
         }
 
-        // ================= RECEIVE =================
+        // ===== RECEIVE NDP RESPONSES =====
         uint8_t buffer[2048];
-        time_t start = time(NULL);
 
-        while ((time(NULL) - start) * 1000 < config->timeout) {
+        struct timeval start, now;
+        gettimeofday(&start, NULL);
 
-            ssize_t len = recv(sock_raw, buffer, sizeof(buffer), 0);
-            if (len < 0) continue;
+        while (1) {
 
+            // Check timeout (ms precision)
+            gettimeofday(&now, NULL);
+            int elapsed = (now.tv_sec  - start.tv_sec)  * 1000 +
+                          (now.tv_usec - start.tv_usec) / 1000;
+
+            if (elapsed > config->timeout) break;
+
+            ssize_t len = recv(sock_raw, buffer, sizeof(buffer), MSG_DONTWAIT);
+            if (len <= 0) continue;
+
+            // Parse Ethernet header
             struct ethernet_header *eth = (struct ethernet_header *)buffer;
             if (ntohs(eth->ether_type) != ETH_P_IPV6) continue;
 
+            // Parse IPv6 header
             struct ipv6_header *ip6 =
                 (struct ipv6_header *)(buffer + sizeof(struct ethernet_header));
             if (ip6->next_header != 58) continue;
 
+            // Parse ICMPv6
             struct icmp_v6 *icmp =
                 (struct icmp_v6 *)(buffer +
-                                  sizeof(struct ethernet_header) +
-                                  sizeof(struct ipv6_header));
+                                   sizeof(struct ethernet_header) +
+                                   sizeof(struct ipv6_header));
 
-            if (icmp->type != 136) continue; // NA
+            // Only Neighbor Advertisement
+            if (icmp->type != 136) continue;
 
-            struct in6_addr sender_ip = ip6->source_ipv6;
+            struct in6_addr target_ip = icmp->target;
 
+            // Extract MAC from option (type 2)
             uint8_t *opt_ptr = (uint8_t *)icmp + sizeof(struct icmp_v6);
+            uint8_t *mac = NULL;
 
-            if (opt_ptr[0] != 2) continue;
+            if (opt_ptr[0] == 2) {
+                mac = &opt_ptr[2];
+            }
 
-            uint8_t *mac = &opt_ptr[2];
-
-            // ===== MATCH HOST =====
+            // Match response with our hosts
             for (uint64_t k = global_index;
                  k < global_index + s->host_count;
                  k++) {
@@ -495,11 +613,15 @@ void ndp_system(struct program_interface *config,
                 if (hosts[k].family != AF_INET6) continue;
 
                 if (memcmp(&hosts[k].ip.ipv6,
-                           &sender_ip,
+                           &target_ip,
                            sizeof(struct in6_addr)) == 0) {
 
                     hosts[k].ndp_ok = true;
-                    memcpy(hosts[k].mac_addr, mac, 6);
+
+                    if (mac) {
+                        memcpy(hosts[k].mac_addr, mac, 6);
+                    }
+
                     break;
                 }
             }
@@ -509,8 +631,14 @@ void ndp_system(struct program_interface *config,
     }
 }
 
+
+/**
+ * Sends ICMP echo requests (ping) to all hosts and processes replies.
+ * Works for both IPv4 (ICMP) and IPv6 (ICMPv6).
+ */
 void icmp_system(struct program_interface *config, struct host *hosts)
 {
+    // Create raw sockets for IPv4 and IPv6 ICMP
     int sock4 = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     int sock6 = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
 
@@ -519,7 +647,19 @@ void icmp_system(struct program_interface *config, struct host *hosts)
         return;
     }
 
-    // ===== SEND =====
+    // Bind sockets to selected interface
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, config->interface, IFNAMSIZ - 1);
+
+    if (setsockopt(sock4, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) < 0) {
+        perror("SO_BINDTODEVICE sock4");
+    }
+    if (setsockopt(sock6, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) < 0) {
+        perror("SO_BINDTODEVICE sock6");
+    }
+
+    // ===== SEND ICMP REQUESTS =====
     for (uint32_t i = 0; i < config->total_hostcount; i++) {
 
         hosts[i].icmp_ok = false;
@@ -531,12 +671,14 @@ void icmp_system(struct program_interface *config, struct host *hosts)
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = hosts[i].ip.ipv4;
 
+            // ICMP Echo Request
             struct icmphdr icmp = {0};
             icmp.type = ICMP_ECHO;
             icmp.code = 0;
-            icmp.un.echo.id = htons(1234);
+            icmp.un.echo.id  = htons(1234);
             icmp.un.echo.sequence = htons(i);
 
+            // Compute checksum
             icmp.checksum = icmp_checksum(&icmp, sizeof(icmp));
 
             sendto(sock4, &icmp, sizeof(icmp), 0,
@@ -547,21 +689,24 @@ void icmp_system(struct program_interface *config, struct host *hosts)
         else if (hosts[i].family == AF_INET6) {
 
             struct sockaddr_in6 addr6 = {0};
-            addr6.sin6_family = AF_INET6;
-            addr6.sin6_addr = hosts[i].ip.ipv6;
+            addr6.sin6_family   = AF_INET6;
+            addr6.sin6_addr     = hosts[i].ip.ipv6;
+
+            // Needed for link-local IPv6 addresses
+            addr6.sin6_scope_id = if_nametoindex(config->interface);
 
             struct icmp6_hdr icmp6 = {0};
             icmp6.icmp6_type = ICMP6_ECHO_REQUEST;
             icmp6.icmp6_code = 0;
-            icmp6.icmp6_id = htons(1234);
-            icmp6.icmp6_seq = htons(i);
+            icmp6.icmp6_id   = htons(1234);
+            icmp6.icmp6_seq  = htons(i);
 
             sendto(sock6, &icmp6, sizeof(icmp6), 0,
                    (struct sockaddr*)&addr6, sizeof(addr6));
         }
     }
 
-    // ===== RECEIVE =====
+    // ===== RECEIVE ICMP REPLIES =====
     uint8_t buffer[1500];
 
     struct timeval start, now;
@@ -569,27 +714,30 @@ void icmp_system(struct program_interface *config, struct host *hosts)
 
     while (1) {
 
+        // Check timeout
         gettimeofday(&now, NULL);
-        int elapsed = (now.tv_sec - start.tv_sec) * 1000 +
+        int elapsed = (now.tv_sec  - start.tv_sec)  * 1000 +
                       (now.tv_usec - start.tv_usec) / 1000;
 
-        if (elapsed > config->timeout)
-            break;
+        if (elapsed > config->timeout) break;
 
-        // ===== IPv4 RECV =====
+        // ===== IPv4 RECEIVE =====
         ssize_t len4 = recv(sock4, buffer, sizeof(buffer), MSG_DONTWAIT);
 
         if (len4 > 0) {
 
-            if (len4 < sizeof(struct iphdr)) continue;
+            // Packet must contain at least IP header
+            if (len4 < (ssize_t)sizeof(struct iphdr)) continue;
 
-            struct iphdr *ip = (struct iphdr*)buffer;
+            struct iphdr   *ip   = (struct iphdr*)buffer;
             struct icmphdr *icmp = (struct icmphdr*)(buffer + ip->ihl * 4);
 
+            // Only Echo Reply
             if (icmp->type == ICMP_ECHOREPLY) {
 
                 uint32_t src_ip = ip->saddr;
 
+                // Match reply with known hosts
                 for (uint32_t i = 0; i < config->total_hostcount; i++) {
                     if (hosts[i].family == AF_INET &&
                         hosts[i].ip.ipv4 == src_ip) {
@@ -601,24 +749,23 @@ void icmp_system(struct program_interface *config, struct host *hosts)
             }
         }
 
-        // ===== IPv6 RECV =====
-        ssize_t len6 = recv(sock6, buffer, sizeof(buffer), MSG_DONTWAIT);
+        // ===== IPv6 RECEIVE =====
+        struct sockaddr_in6 addr6;
+        socklen_t addrlen = sizeof(addr6);
+
+        ssize_t len6 = recvfrom(sock6, buffer, sizeof(buffer), MSG_DONTWAIT,
+                                (struct sockaddr*)&addr6, &addrlen);
 
         if (len6 > 0) {
 
-            if (len6 < sizeof(struct icmp6_hdr)) continue;
+            if (len6 < (ssize_t)sizeof(struct icmp6_hdr)) continue;
 
             struct icmp6_hdr *icmp6 = (struct icmp6_hdr*)buffer;
 
+            // Only Echo Reply
             if (icmp6->icmp6_type == ICMP6_ECHO_REPLY) {
 
-                // pri IPv6 potrebujeme zdroj z recvfrom
-                struct sockaddr_in6 addr6;
-                socklen_t addrlen = sizeof(addr6);
-
-                recvfrom(sock6, buffer, sizeof(buffer), MSG_DONTWAIT,
-                         (struct sockaddr*)&addr6, &addrlen);
-
+                // Match reply with known hosts
                 for (uint32_t i = 0; i < config->total_hostcount; i++) {
                     if (hosts[i].family == AF_INET6 &&
                         memcmp(&hosts[i].ip.ipv6,
@@ -636,6 +783,7 @@ void icmp_system(struct program_interface *config, struct host *hosts)
     close(sock4);
     close(sock6);
 }
+
 
 void mac_to_string_dash(uint8_t *mac, char *out) {
     sprintf(out, "%02x-%02x-%02x-%02x-%02x-%02x",
@@ -738,25 +886,32 @@ int main(int argc, char **argv) {
         // Processing user input
         argument_parser(argc, argv, &config);
 
-        // Creating raw socket for sending packets into network
+        // Network interface declaration
         struct sockaddr_ll device;
+
+        // Socket for ARP system
         int sock_raw = create_raw_socket(&config, &device);
-        // Allocating space for every scanned host
+
+        // Host buffer
         struct host *hosts = calloc(config.total_hostcount, sizeof(struct host));
         if(!hosts) {
             fprintf(stderr,"No hosts for scanning");
             exit(EXIT_FAILURE);
         }
-        // Sending ARP and storing arp replies (ipv4)
+        // ARP engine
         arp_system(&config, sock_raw, &device,hosts);
+
+        // NDP engine
         ndp_system(&config, &device, sock_raw, hosts);
+
+        // ICMP engine
         icmp_system(&config, hosts);
+
+        // Output engine
         print_output(&config, hosts);
 
-
-
+        // memory deallocation
         free(hosts);
-
 
         return 0;
 }

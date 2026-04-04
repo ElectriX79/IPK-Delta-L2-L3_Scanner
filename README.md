@@ -110,11 +110,83 @@ Each result contains:
 
 ## Testing
 
-The application was tested on Linux (Ubuntu).  
-Network communication was verified using:
+The application was tested in a controlled environment using Linux network namespaces
+and real network interfaces.
 
-sudo tcpdump -i eth0 arp  
-sudo tcpdump -i eth0 icmp
+1. Basic functionality tests
+
+Tested correct behavior of CLI arguments:
+
+./ipk-L2L3-scan -h
+prints help and exits
+./ipk-L2L3-scan -i
+prints list of available interfaces
+./ipk-L2L3-scan -i <interface>
+loads interface information (IP, MAC)
+
+Tested invalid inputs:
+
+missing arguments
+invalid subnet format
+invalid prefix
+2. IPv4 (ARP + ICMP) tests
+
+Example:
+
+./ipk-L2L3-scan -i eth0 -s 192.168.1.0/24
+
+Verified:
+
+ARP requests are sent to all hosts
+ARP replies are correctly processed
+MAC addresses are stored
+ICMP echo requests are sent
+ICMP replies mark hosts as reachable
+
+Used tools:
+
+tcpdump -i eth0 arp
+tcpdump -i eth0 icmp
+3. IPv6 (NDP + ICMPv6) tests
+
+Example:
+
+./ipk-L2L3-scan -i eth0 -s fd00::/120
+
+Verified:
+
+Neighbor Solicitation packets are sent
+correct multicast addresses are generated
+Neighbor Advertisement responses are processed
+MAC addresses are extracted
+ICMPv6 works correctly
+
+Used tools:
+
+tcpdump -i eth0 icmp6
+4. Virtual network testing
+
+Testing environment created using Linux network namespaces:
+
+ip netns add ns1
+ip netns add ns2
+
+ip link add veth1 type veth peer name veth2
+
+ip link set veth1 netns ns1
+ip link set veth2 netns ns2
+
+ip netns exec ns1 ip addr add 192.168.1.1/24 dev veth1
+ip netns exec ns2 ip addr add 192.168.1.2/24 dev veth2
+
+ip netns exec ns1 ip link set veth1 up
+ip netns exec ns2 ip link set veth2 up
+
+This allowed controlled testing of:
+
+ARP replies
+ICMP responses
+multiple hosts simulation
 
 ---
 

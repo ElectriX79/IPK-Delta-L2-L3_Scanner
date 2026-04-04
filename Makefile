@@ -16,3 +16,9 @@ src/%.o: src/%.c
 
 clean:
 	rm -f $(OBJ) $(TARGET)
+
+test:
+	bash test.sh
+
+NixDevShellName:
+	@echo c
